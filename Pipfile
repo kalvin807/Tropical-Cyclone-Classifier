@@ -1,0 +1,45 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+
+[packages]
+autopep8 = "*"
+backcall = "*"
+beautifulsoup4 = "*"
+bs4 = "*"
+certifi = "*"
+chardet = "*"
+click = "*"
+colorama = "*"
+decorator = "*"
+idna = "*"
+ipykernel = "*"
+ipython = "*"
+jedi = "*"
+jupyter-client = "*"
+jupyter-core = "*"
+lxml = "*"
+parso = "*"
+pickleshare = "*"
+prompt-toolkit = "*"
+pycodestyle = "*"
+python-dateutil = "*"
+pywin32 = "*"
+pyzmq = "*"
+requests = "*"
+six = "*"
+soupsieve = "*"
+tornado = "*"
+traitlets = "*"
+typer = "*"
+urllib3 = "*"
+wcwidth = "*"
+ipython_genutils = "*"
+Pillow = "*"
+Pygments = "*"
+
+[requires]
+python_version = "3.8"
