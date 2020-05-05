@@ -1,4 +1,3 @@
-import argparse
 import glob
 import os
 import sys
@@ -15,6 +14,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.models as models
+from efficientnet_pytorch import EfficientNet
 from sklearn.model_selection import train_test_split
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
@@ -22,8 +22,10 @@ from torchvision import transforms
 
 dataset_dir = '.'
 sys.path.append(dataset_dir)
-IMAGES_H5 = f'{dataset_dir}/images.hdf5'
 
+# Global Variables
+IMAGES_H5 = f'{dataset_dir}/images.hdf5'
+NPY_FOLDER = f'{dataset_dir}/uint'
 LABELS = pd.read_csv(f"{dataset_dir}/labels_with_images.csv")
 LABELS['year'] = pd.to_datetime(
     LABELS['datetime'], format='%Y-%m-%d %X').dt.year
@@ -44,58 +46,57 @@ def prepare_dataset(labels, ratio, year):
 
 
 class TyDataset(Dataset):
-    def __init__(self, df):
+    # Make sure you config the dataset properly before you train
+    # TODO: Make it more general and configable
+    def __init__(self, df, transform, channel=1):
         self.df = df
-        self.transform = transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-        ])
+        self.transform = transform
+        self.channel = channel
+        self.sequence = df['sequence'].values
+        self.raw_index = df['raw_index'].values
 
     def __len__(self):
         return len(self.df)
 
     def getImg(self, idx):
-        with h5py.File(f"{dataset_dir}/images.hdf5", 'r') as h5:
-            return getImageFromH5(h5, self.df.iloc[idx])
+        # If you are using npy
+        return np.load(f"{NPY_FOLDER}/{self.sequence[idx]}{self.raw_index[idx]}.npy")
 
+    # When use against with DenseNet you need to make img_arr to have 3 channels, to do so
+    # either by PIL convert('RGB') or use numpy stack(, axis=-1)
     def __getitem__(self, idx):
-        img = Image.fromarray(self.getImg(idx))
-        label = self.df.iloc[idx]['class']
+        img_arr = self.getImg(idx)
+        if self.channel == 3:
+            img = Image.fromarray(np.stack((img_arr,)*3, axis=-1))
+        else:
+            img = Image.fromarray(img_arr)
         image = self.transform(img)
+        label = self.df.iloc[idx]['class']
         return image, label
 
 
-class PretrainNet(nn.Module):
+class EffNet(nn.Module):  # Of course you need to check you are training the correct model or not
     def __init__(self):
-        super(PretrainNet, self).__init__()
-        # Define layers
-        # Input shape: (Batch size, 1, 512, 512)
-        # Convolution layer(s)
-        self.conv = self.densenet()
-        # FC layer(s)
+        super(EffNet, self).__init__()
+
+        self.conv = EfficientNet.from_pretrained('efficientnet-b0')
+
         self.fc = nn.Sequential(
-            nn.LeakyReLU(),
-            # 1000 is the default output size in densenet
-            nn.Linear(1000, 512),
-            nn.Dropout(0.2),
+            nn.Flatten(),
+            nn.Dropout(0.3),
+            nn.Linear(62720, 1024),
+            nn.Dropout(0.3),
             nn.ReLU(),
-            nn.Linear(512, 6)
+            nn.Linear(1024, 6),
         )
 
-    def densenet(self):
-        model = models.densenet161(pretrained=True)
-        for param in model.parameters():
-            param.requires_grad = False
-        return model
-
     def forward(self, x):
-        x = self.conv(x)
+        x = self.conv.extract_features(x)
         x = self.fc(x)
         return x
 
 
-class AverageMeter(object):
+class AverageMeter(object):  # Helper functions for training loops
     """Computes and stores the average and current value"""
 
     def __init__(self, name, fmt=':f'):
@@ -138,27 +139,27 @@ class ProgressMeter(object):
 
 
 def adjust_learning_rate(optimizer, epoch, lr):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = lr * (0.1 ** (epoch // 30))
+    """Sets the learning rate to the initial LR decayed by 10 every 25 epochs"""
+    lr = lr * (0.1 ** (epoch // 25))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
 
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
+def accuracy(output, target):
+    """Computes the accuracy over the top predictions"""
     with torch.no_grad():
-        maxk = max(topk)
         batch_size = target.size(0)
 
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+        _, preds = torch.max(output.data, 1)
+        correct = (preds == target).sum().item()
 
-        res = []
-        for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+        return correct/batch_size
+
+
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+    torch.save(state, filename)
+    if is_best:
+        shutil.copyfile(filename, 'model_best.pth.tar')
 
 
 def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
@@ -166,9 +167,8 @@ def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
-    top3 = AverageMeter('Acc@3', ':6.2f')
     progress = ProgressMeter(len(train_loader), batch_time, data_time, losses, top1,
-                             top3, prefix="Epoch: [{}]".format(epoch))
+                             prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
     model.train()
@@ -184,12 +184,10 @@ def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
         # compute output
         output = model(input)
         loss = criterion(output, target)
-
         # measure accuracy and record loss
-        acc1, acc3 = accuracy(output, target, topk=(1, 3))
+        acc1 = accuracy(output, target)
         losses.update(loss.item(), input.size(0))
-        top1.update(acc1[0], input.size(0))
-        top3.update(acc3[0], input.size(0))
+        top1.update(acc1, input.size(0))
 
         # compute gradient and do Adam
         optimizer.zero_grad()
@@ -203,14 +201,15 @@ def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
         if i % freq == 0:
             progress.print(i)
 
+    return losses.avg
+
 
 def validate(val_loader, model, criterion, freq, gpu):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
-    top3 = AverageMeter('Acc@3', ':6.2f')
-    progress = ProgressMeter(len(val_loader), batch_time, losses, top1, top3,
-                             prefix='Test: ')
+    progress = ProgressMeter(len(val_loader), batch_time,
+                             losses, top1, prefix='Test: ')
 
     # switch to evaluate mode
     model.eval()
@@ -226,10 +225,9 @@ def validate(val_loader, model, criterion, freq, gpu):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            acc1, acc3 = accuracy(output, target, topk=(1, 3))
+            acc1 = accuracy(output, target)
             losses.update(loss.item(), input.size(0))
-            top1.update(acc1[0], input.size(0))
-            top3.update(acc3[0], input.size(0))
+            top1.update(acc1, input.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -238,14 +236,15 @@ def validate(val_loader, model, criterion, freq, gpu):
             if i % freq == 0:
                 progress.print(i)
 
-        print(' * Acc@1 {top1.avg:.3f} Acc@3 {top3.avg:.3f}'
-              .format(top1=top1, top3=top3))
+        print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
 
     return top1.avg
 
 
 def main_worker(gpu, args):
     global best_acc1
+
+    print("Worker {} starts".format(gpu))
 
     best_acc1 = 0
     ddl = args['ddl']
@@ -286,14 +285,17 @@ def main_worker(gpu, args):
                               pin_memory=args['pin_memory'],
                               drop_last=True,
                               shuffle=(ddl is False),
-                              train_sampler=train_sampler)
+                              sampler=train_sampler)
 
-    dev_loader = DataLoader(args['train_set'],
+    dev_loader = DataLoader(args['dev_set'],
                             batch_size=args['batch_size'],
                             num_workers=args['worker_size'],
                             pin_memory=args['pin_memory'],
                             drop_last=True,
                             shuffle=False)
+
+    losses = []
+    accuracies = []
 
     for epoch in range(0, args['epochs']):
         if ddl:
@@ -302,31 +304,62 @@ def main_worker(gpu, args):
         adjust_learning_rate(optimizer, epoch, lr)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, freq, gpu)
+        loss = train(train_loader, model, criterion,
+                     optimizer, epoch, freq, gpu)
+        losses.append(loss)
 
         # evaluate on validation set
         acc1 = validate(dev_loader, model, criterion, freq, gpu)
+        accuracies.appen(acc1)
 
         # remember best acc@1 and save checkpoint
+        is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
+        if not ddl or (ddl and gpu == 0):
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'best_acc1': best_acc1,
+                'optimizer': optimizer.state_dict(),
+            }, is_best)
 
-def main(args):
+    # Save stat for analysis usage
+    print('Loss over epoch :', losses)
+    print('Acc over epoch :', accuracies)
+    pd.Dataframe(data={'Loss': losses, 'Accuracy': accuracies}).to_csv(
+        f'{dataset_dir}/train_stats-{gpu}.csv')
+
+
+def main():
+  # Define arguments here
     args = {
-        'model': PretrainNet(),
+        'model': EffNet(),
         'epochs': 50,
-        'lr': 0.001,
+        'lr': 0.01,
         'freq': 100,
-        'batch_size': 512,
+        'batch_size': 64,
         'worker_size': 8,
         'pin_memory': True,
         'ddl': False
     }
 
-    dataset = prepare_dataset(LABELS, 0.2, 2012)
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5])
+    ])
 
-    args['train_set'] = dataset['train']
-    args['dev_set'] = dataset['dev']
+    dev_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5])
+    ])
+
+    dataset = prepare_dataset(LABELS, 0.8, 2012)
+    args['train_set'] = TyDataset(dataset['train'], train_transform, channel=3)
+    args['dev_set'] = TyDataset(dataset['dev'], dev_transform, channel=3)
 
     if torch.cuda.device_count() > 1:
         args['gpus'] = torch.cuda.device_count()
@@ -336,9 +369,9 @@ def main(args):
         args['ddl'] = True
         # Set up Master node listening port/addr
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '8889'
+        os.environ['MASTER_PORT'] = '8899'
         # Spawn processes according to world_size
-        mp.spawn(main_worker, nprocs=args['gpus'], args=args)
+        mp.spawn(main_worker, nprocs=args['gpus'], args=(args,))
     else:
         main_worker(0, args)
 
