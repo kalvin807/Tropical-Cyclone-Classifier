@@ -8,4 +8,5 @@
 conda activate base
 
 # cd your your desired directory and execute your program, e.g.
+cd ~/COMP3359
 python train.py
