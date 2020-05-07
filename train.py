@@ -76,19 +76,20 @@ class TyDataset(Dataset):
         return image, label
 
 
-class EffNet(nn.Module):  # Of course you need to check you are training the correct model or not
+class EffNet(nn.Module):
+    # Of course you need to check you are training the correct model or not
     def __init__(self):
         super(EffNet, self).__init__()
 
-        self.conv = EfficientNet.from_pretrained('efficientnet-b6')
+        self.conv = EfficientNet.from_pretrained('efficientnet-b3')
         self.fc = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(2304, 512),
-            nn.Dropout(0.3),
-            nn.ReLU(),
-            nn.Linear(512,6)
+            nn.Dropout(0.25),
+            nn.Linear(1536, 768),
+            nn.Dropout(0.35),
+            nn.ELU(inplace=True),
+            nn.Linear(640,6)
         )
 
     def forward(self, x):
@@ -202,7 +203,7 @@ def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
         if i % freq == 0:
             progress.print(i)
 
-    return losses.avg
+    return top1.avg, losses.avg
 
 
 def validate(val_loader, model, criterion, freq, gpu):
@@ -239,7 +240,7 @@ def validate(val_loader, model, criterion, freq, gpu):
 
         print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
 
-    return top1.avg
+    return top1.avg, losses.avg
 
 
 def main_worker(gpu, args):
@@ -295,8 +296,10 @@ def main_worker(gpu, args):
                             drop_last=True,
                             shuffle=False)
 
-    losses = []
-    accuracies = []
+    train_losses = []
+    train_accs = []
+    dev_losses = []
+    dev_accs = []
 
     for epoch in range(0, args['epochs']):
         if ddl:
@@ -305,13 +308,15 @@ def main_worker(gpu, args):
         adjust_learning_rate(optimizer, epoch, lr)
 
         # train for one epoch
-        loss = train(train_loader, model, criterion,
+        acc1, loss = train(train_loader, model, criterion,
                      optimizer, epoch, freq, gpu)
-        losses.append(loss)
+        train_accs.append(acc1)
+        train_losses.append(loss)
 
         # evaluate on validation set
-        acc1 = validate(dev_loader, model, criterion, freq, gpu)
-        accuracies.append(acc1)
+        acc1, loss = validate(dev_loader, model, criterion, freq, gpu)
+        dev_accs.append(acc1)
+        dev_losses.append(loss)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -326,13 +331,13 @@ def main_worker(gpu, args):
             }, is_best)
 
     # Save stat for analysis usage
-    print('Loss over epoch :', losses)
-    print('Acc over epoch :', accuracies)
-    data = {'Loss': losses,
-            'Accuracy': accuracies}
-    df = pd.Dataframe(data=data)
-    df.to_csv('training_stat.csv')
-
+    print('Train Loss over epoch :', train_losses)
+    print('Train Acc over epoch :', train_accs)
+    print('Dev Loss over epoch :', dev_losses)
+    print('Dev Acc over epoch :', dev_accs)
+    data = {'Train_Loss': train_losses, 'Train_Accuracy': train_accs,
+	    'Dev_Loss': dev_losses, 'Dev_Accuracy': dev_accs}
+    pd.DataFrame(data=data).to_csv(f'{dataset_dir}/train_stats-{gpu}.csv')
 
 def main():
   # Define arguments here
@@ -341,7 +346,7 @@ def main():
         'epochs': 50,
         'lr': 0.01,
         'freq': 100,
-        'batch_size': 16,
+        'batch_size': 32,
         'worker_size': 16,
         'pin_memory': True,
         'ddl': False
@@ -379,6 +384,23 @@ def main():
     else:
         main_worker(0, args)
 
+    print("--------------------------")
+    print("*** Testing you know ***")
+    test_transform = transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5], std=[0.5])
+                ])
+    test_ds = TyDataset(dataset['test'], test_transform, channel=3)
+    test_loader = DataLoader(test_ds,
+                            batch_size = 32,
+                            num_workers= 16,
+                            pin_memory= True,
+                            drop_last=True,
+                            shuffle=False)
+    _, _ = validate(val_loader=test_loader, model=args['model'],
+		    criterion=nn.CrossEntropyLoss().cuda(0), freq=100, gpu=0)
 
 if __name__ == "__main__":
     main()
