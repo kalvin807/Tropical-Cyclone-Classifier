@@ -1,5 +1,6 @@
 import glob
 import os
+import shutil
 import sys
 import time
 
@@ -25,7 +26,7 @@ sys.path.append(dataset_dir)
 
 # Global Variables
 IMAGES_H5 = f'{dataset_dir}/images.hdf5'
-NPY_FOLDER = f'{dataset_dir}/uint'
+NPY_FOLDER = f'{dataset_dir}/uint8'
 LABELS = pd.read_csv(f"{dataset_dir}/labels_with_images.csv")
 LABELS['year'] = pd.to_datetime(
     LABELS['datetime'], format='%Y-%m-%d %X').dt.year
@@ -41,7 +42,7 @@ def prepare_dataset(labels, ratio, year):
     test_set = processed_labels[processed_labels['year'] >= year]
     traindev_set = processed_labels[processed_labels['year'] < year]
     train_set, dev_set = train_test_split(
-        traindev_set, train_size=ratio)
+        traindev_set, train_size=ratio, shuffle=True)
     return {'train': train_set, 'dev': dev_set, 'test': test_set}
 
 
@@ -79,15 +80,15 @@ class EffNet(nn.Module):  # Of course you need to check you are training the cor
     def __init__(self):
         super(EffNet, self).__init__()
 
-        self.conv = EfficientNet.from_pretrained('efficientnet-b0')
-
+        self.conv = EfficientNet.from_pretrained('efficientnet-b6')
         self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Dropout(0.3),
-            nn.Linear(62720, 1024),
+            nn.Linear(2304, 512),
             nn.Dropout(0.3),
             nn.ReLU(),
-            nn.Linear(1024, 6),
+            nn.Linear(512,6)
         )
 
     def forward(self, x):
@@ -267,7 +268,7 @@ def main_worker(gpu, args):
         args['batch_size'] = int(args['batch_size']/args['gpus'])
         args['worker_size'] = int(
             (args['worker_size'] + args['gpus'] - 1) / args['gpus'])
-        model = DDP(model, device_ids=[gpu])
+        model = DDP(model, device_ids=[gpu], find_unused_parameters=False)
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(gpu)
@@ -310,7 +311,7 @@ def main_worker(gpu, args):
 
         # evaluate on validation set
         acc1 = validate(dev_loader, model, criterion, freq, gpu)
-        accuracies.appen(acc1)
+        accuracies.append(acc1)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -327,8 +328,10 @@ def main_worker(gpu, args):
     # Save stat for analysis usage
     print('Loss over epoch :', losses)
     print('Acc over epoch :', accuracies)
-    pd.Dataframe(data={'Loss': losses, 'Accuracy': accuracies}).to_csv(
-        f'{dataset_dir}/train_stats-{gpu}.csv')
+    data = {'Loss': losses,
+            'Accuracy': accuracies}
+    df = pd.Dataframe(data=data)
+    df.to_csv('training_stat.csv')
 
 
 def main():
@@ -338,14 +341,15 @@ def main():
         'epochs': 50,
         'lr': 0.01,
         'freq': 100,
-        'batch_size': 64,
-        'worker_size': 8,
+        'batch_size': 16,
+        'worker_size': 16,
         'pin_memory': True,
         'ddl': False
     }
 
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5])
     ])
@@ -357,7 +361,7 @@ def main():
         transforms.Normalize(mean=[0.5], std=[0.5])
     ])
 
-    dataset = prepare_dataset(LABELS, 0.8, 2012)
+    dataset = prepare_dataset(LABELS, 0.7, 2012)
     args['train_set'] = TyDataset(dataset['train'], train_transform, channel=3)
     args['dev_set'] = TyDataset(dataset['dev'], dev_transform, channel=3)
 
