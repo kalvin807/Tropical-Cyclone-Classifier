@@ -89,7 +89,7 @@ class EffNet(nn.Module):
             nn.Linear(1536, 768),
             nn.Dropout(0.35),
             nn.ELU(inplace=True),
-            nn.Linear(640,6)
+            nn.Linear(768,6)
         )
 
     def forward(self, x):
@@ -343,7 +343,7 @@ def main():
   # Define arguments here
     args = {
         'model': EffNet(),
-        'epochs': 50,
+        'epochs': 75,
         'lr': 0.01,
         'freq': 100,
         'batch_size': 32,
