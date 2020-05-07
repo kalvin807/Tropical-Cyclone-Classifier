@@ -1,12 +1,13 @@
+""" Imports """
 import glob
 import os
 import sys
 import time
-
+import shutil
+# ML and data processing related imports
 import numpy as np
 import pandas as pd
 from PIL import Image
-
 import h5py
 import torch
 import torch.distributed as dist
@@ -20,6 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
+""" Initialize """
 dataset_dir = '.'
 sys.path.append(dataset_dir)
 
@@ -30,11 +32,14 @@ LABELS = pd.read_csv(f"{dataset_dir}/labels_with_images.csv")
 LABELS['year'] = pd.to_datetime(
     LABELS['datetime'], format='%Y-%m-%d %X').dt.year
 
-
+""" Data functions """
 def getImageFromH5(h5, row):
     img_name = f"{row['sequence']}{row['raw_index']}"
     return h5[img_name][()]
 
+def getImageFromNPY(row):
+    img_name = f"{row['sequence']}{row['raw_index']}"
+    return np.load(f"{NPY_FOLDER}/{img_name}.npy")
 
 def prepare_dataset(labels, ratio, year):
     processed_labels = labels[['class', 'sequence', 'raw_index', 'year']]
@@ -44,7 +49,7 @@ def prepare_dataset(labels, ratio, year):
         traindev_set, train_size=ratio)
     return {'train': train_set, 'dev': dev_set, 'test': test_set}
 
-
+""" Custom pytorch dataset """
 class TyDataset(Dataset):
     # Make sure you config the dataset properly before you train
     # TODO: Make it more general and configable
@@ -61,6 +66,8 @@ class TyDataset(Dataset):
     def getImg(self, idx):
         # If you are using npy
         return np.load(f"{NPY_FOLDER}/{self.sequence[idx]}{self.raw_index[idx]}.npy")
+        #with h5py.File(f"{dataset_dir}/compressed_images.hdf5", 'r') as h5:
+            #return getImageFromH5(h5, self.df.iloc[idx])
 
     # When use against with DenseNet you need to make img_arr to have 3 channels, to do so
     # either by PIL convert('RGB') or use numpy stack(, axis=-1)
@@ -74,20 +81,22 @@ class TyDataset(Dataset):
         label = self.df.iloc[idx]['class']
         return image, label
 
-
+""" The model to train """
 class EffNet(nn.Module):  # Of course you need to check you are training the correct model or not
     def __init__(self):
         super(EffNet, self).__init__()
 
         self.conv = EfficientNet.from_pretrained('efficientnet-b0')
 
+        # different architecture
         self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(62720, 1024),
-            nn.Dropout(0.3),
-            nn.ReLU(),
-            nn.Linear(1024, 6),
+            nn.Dropout(0.25),
+            nn.Linear(1280, 640),
+            nn.Dropout(0.35),
+            nn.ELU(inplace=True),
+            nn.Linear(640, 6),
         )
 
     def forward(self, x):
@@ -95,7 +104,7 @@ class EffNet(nn.Module):  # Of course you need to check you are training the cor
         x = self.fc(x)
         return x
 
-
+""" Training utilities """
 class AverageMeter(object):  # Helper functions for training loops
     """Computes and stores the average and current value"""
 
@@ -159,9 +168,9 @@ def accuracy(output, target):
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, 'justin_model_best.pth.tar')
 
-
+""" The meat and potatoes this is """
 def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
@@ -201,8 +210,7 @@ def train(train_loader, model, criterion, optimizer, epoch, freq, gpu):
         if i % freq == 0:
             progress.print(i)
 
-    return losses.avg
-
+    return losses.avg, top1.avg
 
 def validate(val_loader, model, criterion, freq, gpu):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -238,9 +246,9 @@ def validate(val_loader, model, criterion, freq, gpu):
 
         print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
 
-    return top1.avg
+    return losses.avg, top1.avg
 
-
+""" Worker """
 def main_worker(gpu, args):
     global best_acc1
 
@@ -294,8 +302,12 @@ def main_worker(gpu, args):
                             drop_last=True,
                             shuffle=False)
 
-    losses = []
-    accuracies = []
+    #losses = []
+    #accuracies = []
+    train_losses = []
+    train_acc = []
+    dev_losses = []
+    dev_acc = []
 
     for epoch in range(0, args['epochs']):
         if ddl:
@@ -304,13 +316,15 @@ def main_worker(gpu, args):
         adjust_learning_rate(optimizer, epoch, lr)
 
         # train for one epoch
-        loss = train(train_loader, model, criterion,
+        loss, acc = train(train_loader, model, criterion,
                      optimizer, epoch, freq, gpu)
-        losses.append(loss)
+        train_losses.append(loss)
+        train_acc.append(acc)
 
         # evaluate on validation set
-        acc1 = validate(dev_loader, model, criterion, freq, gpu)
-        accuracies.appen(acc1)
+        loss1, acc1 = validate(dev_loader, model, criterion, freq, gpu)
+        dev_losses.append(loss1)
+        dev_acc.append(acc1)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -325,9 +339,13 @@ def main_worker(gpu, args):
             }, is_best)
 
     # Save stat for analysis usage
-    print('Loss over epoch :', losses)
-    print('Acc over epoch :', accuracies)
-    pd.Dataframe(data={'Loss': losses, 'Accuracy': accuracies}).to_csv(
+    print('----------------------------------------')
+    print('*** Training Complete! ***')
+    print('Train Loss over epoch :', train_losses)
+    print('Train Acc over epoch :', train_acc)
+    print('Dev Loss over epoch :', dev_losses)
+    print('Dev Acc over epoch :', dev_acc)
+    pd.Dataframe(data={'Train_Loss': train_losses, 'Train_Accuracy': train_acc, 'Dev_Loss': dev_losses, 'Dev_Accuracy': dev_acc}).to_csv(
         f'{dataset_dir}/train_stats-{gpu}.csv')
 
 
@@ -335,10 +353,10 @@ def main():
   # Define arguments here
     args = {
         'model': EffNet(),
-        'epochs': 50,
-        'lr': 0.01,
+        'epochs': 70, #50 -> 70
+        'lr': 0.01, #will decay
         'freq': 100,
-        'batch_size': 64,
+        'batch_size': 128, #the biggest I can afford
         'worker_size': 8,
         'pin_memory': True,
         'ddl': False
@@ -357,7 +375,7 @@ def main():
         transforms.Normalize(mean=[0.5], std=[0.5])
     ])
 
-    dataset = prepare_dataset(LABELS, 0.8, 2012)
+    dataset = prepare_dataset(LABELS, 0.8, 2016) #different
     args['train_set'] = TyDataset(dataset['train'], train_transform, channel=3)
     args['dev_set'] = TyDataset(dataset['dev'], dev_transform, channel=3)
 
@@ -374,7 +392,23 @@ def main():
         mp.spawn(main_worker, nprocs=args['gpus'], args=(args,))
     else:
         main_worker(0, args)
-
+    
+    print("--------------------------")
+    print("*** Testing you know ***")
+    test_transform = transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5], std=[0.5])
+                ])
+    test_ds = TyDataset(dataset['test'], test_transform, channel=3)
+    test_loader = DataLoader(test_ds,
+                            batch_size = 64,
+                            num_workers= 8,
+                            pin_memory= True,
+                            drop_last=True,
+                            shuffle=True)
+    _, _ = validate(val_loader=test_loader, model=args['model'], criterion=nn.CrossEntropyLoss().cuda(0), freq=100, gpu=0)
 
 if __name__ == "__main__":
     main()
