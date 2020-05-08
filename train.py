@@ -141,8 +141,8 @@ class ProgressMeter(object):
 
 
 def adjust_learning_rate(optimizer, epoch, lr):
-    """Sets the learning rate to the initial LR decayed by 10 every 25 epochs"""
-    lr = lr * (0.1 ** (epoch // 25))
+    """Sets the learning rate to the initial LR decayed by 10 every 20 epochs"""
+    lr = lr * (0.1 ** (epoch // 20))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -274,7 +274,12 @@ def main_worker(gpu, args):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(gpu)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr)
+    # optimizer = torch.optim.Adam(model.parameters(), lr)
+    optimizer = torch.optim.SGD(model.parameters(),
+                                lr,
+                                momentum=0.9,
+                                weight_decay=0.0001,
+                                nesterov = True)
 
     torch.backends.cudnn.benchmark = True
 
@@ -343,10 +348,10 @@ def main():
   # Define arguments here
     args = {
         'model': EffNet(),
-        'epochs': 75,
-        'lr': 0.01,
+        'epochs': 60,
+        'lr': 0.1,
         'freq': 100,
-        'batch_size': 32,
+        'batch_size': 56,
         'worker_size': 16,
         'pin_memory': True,
         'ddl': False
