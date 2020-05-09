@@ -30,7 +30,7 @@ NPY_FOLDER = f'{dataset_dir}/uint8'
 LABELS = pd.read_csv(f"{dataset_dir}/labels_with_images.csv")
 LABELS['year'] = pd.to_datetime(
     LABELS['datetime'], format='%Y-%m-%d %X').dt.year
-
+LABELS = LABELS[LABELS['class'] < 5]
 
 def getImageFromH5(h5, row):
     img_name = f"{row['sequence']}{row['raw_index']}"
@@ -86,10 +86,8 @@ class EffNet(nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Dropout(0.25),
-            nn.Linear(1536, 768),
-            nn.Dropout(0.35),
-            nn.ELU(inplace=True),
-            nn.Linear(768,6)
+            nn.Linear(1536, 1024),
+            nn.Linear(1024,6)
         )
 
     def forward(self, x):
@@ -141,8 +139,8 @@ class ProgressMeter(object):
 
 
 def adjust_learning_rate(optimizer, epoch, lr):
-    """Sets the learning rate to the initial LR decayed by 10 every 20 epochs"""
-    lr = lr * (0.1 ** (epoch // 20))
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    lr = lr * (0.1 ** (epoch // 30))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -348,7 +346,7 @@ def main():
   # Define arguments here
     args = {
         'model': EffNet(),
-        'epochs': 60,
+        'epochs': 100,
         'lr': 0.1,
         'freq': 100,
         'batch_size': 56,
@@ -371,7 +369,7 @@ def main():
         transforms.Normalize(mean=[0.5], std=[0.5])
     ])
 
-    dataset = prepare_dataset(LABELS, 0.7, 2012)
+    dataset = prepare_dataset(LABELS, 0.8, 2012)
     args['train_set'] = TyDataset(dataset['train'], train_transform, channel=3)
     args['dev_set'] = TyDataset(dataset['dev'], dev_transform, channel=3)
 
