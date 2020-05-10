@@ -18,7 +18,7 @@ In this project, we intend to develop a CNN-based model that accepts a satellite
 ## Installation Guide
 
 > Please use Python 3.7 Conda  
-> Linux is highly recommended, Untested in other platform
+> Linux is highly recommended and tested, All code are not tested in other platform
 
 Optional. Create a conda virtual env
 
